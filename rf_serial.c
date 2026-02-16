@@ -11,6 +11,7 @@
 #define RF_LINE_MAX                 (64U)
 #define RF_UART_TX_TIMEOUT_MS       (200U)
 #define RF_DISCARD_TMP_MAX          (8U)
+#define RF_LINE_POLL_SLICE_MS        (5U)
 
 static UART_HandleTypeDef *rfUartHandle = NULL;
 
@@ -21,6 +22,8 @@ static volatile bool rfLineReady = false;
 static char rfLine[RF_LINE_MAX];
 
 static bool parseFirstU16(const char *text, uint16_t *outVal);
+static uint16_t cmdCoreLength(const char *cmd);
+static bool isEchoLineOfCmd(const char *line, const char *cmd);
 
 /**
  * @brief Initializes RF serial driver.
@@ -77,11 +80,20 @@ void rfClearBufferedLine(void)
     __enable_irq();
 }
 
-bool rfDiscardLine(uint32_t timeoutMs)
+void rfDrainRx(uint32_t timeoutMs)
 {
     char tmp[RF_DISCARD_TMP_MAX];
+    uint32_t startTick;
 
-    return rfReadLine(tmp, (uint16_t)sizeof(tmp), timeoutMs);
+    startTick = HAL_GetTick();
+
+    while ((HAL_GetTick() - startTick) < timeoutMs)
+    {
+        if (rfReadLine(tmp, (uint16_t)sizeof(tmp), RF_LINE_POLL_SLICE_MS) == false)
+        {
+            continue;
+        }
+    }
 }
 
 /**
@@ -158,7 +170,12 @@ bool rfReadLine(char *out, uint16_t outMax, uint32_t timeoutMs)
 bool rfQueryU16(const char *cmd, uint16_t *outVal, uint32_t timeoutMs)
 {
     char line[RF_LINE_MAX];
-    bool ok;
+    uint32_t startTick;
+
+    if (cmd == NULL)
+    {
+        return false;
+    }
 
     if (outVal == NULL)
     {
@@ -167,25 +184,82 @@ bool rfQueryU16(const char *cmd, uint16_t *outVal, uint32_t timeoutMs)
 
     rfClearBufferedLine();
 
-    ok = rfSendCmd(cmd);
-    if (ok == false)
+    if (rfSendCmd(cmd) == false)
     {
         return false;
     }
 
-    ok = rfReadLine(line, (uint16_t)sizeof(line), timeoutMs);
-    if (ok == false)
+    startTick = HAL_GetTick();
+
+    while ((HAL_GetTick() - startTick) < timeoutMs)
+    {
+        uint32_t remainMs;
+
+        remainMs = timeoutMs - (HAL_GetTick() - startTick);
+        if (rfReadLine(line, (uint16_t)sizeof(line), remainMs) == false)
+        {
+            return false;
+        }
+
+        if (isEchoLineOfCmd(line, cmd) == true)
+        {
+            continue;
+        }
+
+        if (parseFirstU16(line, outVal) == true)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+static uint16_t cmdCoreLength(const char *cmd)
+{
+    uint16_t len;
+
+    len = (uint16_t)strlen(cmd);
+
+    while ((len > 0U) && ((cmd[len - 1U] == '\r') || (cmd[len - 1U] == '\n')))
+    {
+        len--;
+    }
+
+    return len;
+}
+
+static bool isEchoLineOfCmd(const char *line, const char *cmd)
+{
+    uint16_t coreLen;
+
+    if (line == NULL)
     {
         return false;
     }
 
-    ok = parseFirstU16(line, outVal);
-    if (ok == false)
+    if (cmd == NULL)
     {
         return false;
     }
 
-    return true;
+    coreLen = cmdCoreLength(cmd);
+
+    if (coreLen == 0U)
+    {
+        return false;
+    }
+
+    if (strncmp(line, cmd, coreLen) == 0)
+    {
+        if ((line[coreLen] == '\0') || (line[coreLen] == ' ') || (line[coreLen] == ':') || (line[coreLen] == '>'))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool parseFirstU16(const char *text, uint16_t *outVal)

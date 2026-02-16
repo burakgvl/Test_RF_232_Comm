@@ -242,7 +242,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RF_ONOFF, rfOnOff);
-            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -256,7 +256,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_SETPOINT, setpoint);
-            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -270,7 +270,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RAMP_UP, rampUp);
-            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -284,7 +284,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RAMP_DOWN, rampDown);
-            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;

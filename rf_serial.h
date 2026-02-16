@@ -45,11 +45,14 @@ bool rfReadLine(char *out, uint16_t outMax, uint32_t timeoutMs);
 void rfClearBufferedLine(void);
 
 /**
- * @brief Discards one RF response line if it arrives within timeout.
- * @param timeoutMs Timeout in milliseconds.
- * @return true if a line was discarded, false if timeout/no line.
+ * @brief Drains/consumes all RF lines that arrive within timeout window.
+ *
+ * Useful when command echo is enabled and/or write commands produce acknowledgements
+ * that should not be interpreted as query responses.
+ *
+ * @param timeoutMs Timeout window in milliseconds.
  */
-bool rfDiscardLine(uint32_t timeoutMs);
+void rfDrainRx(uint32_t timeoutMs);
 
 /**
  * @brief Sends a command and parses first uint16 value from the response.
