@@ -14,6 +14,7 @@
 #define GATEWAY_TASK_PERIOD_MS          (100U)
 #define GATEWAY_RF_QUERY_TIMEOUT_MS     (100U)
 #define GATEWAY_RF_WRITE_COOLDOWN_MS    (100U)
+#define GATEWAY_RF_WRITE_DISCARD_MS     (30U)
 
 static void applyPendingWrites(uint32_t nowTick);
 static uint8_t getPendingMaskSnapshot(uint16_t *rampUp,
@@ -75,25 +76,37 @@ void gatewayTaskProcess(void)
     ok = rfQueryU16("QRU\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
     if (ok == true)
     {
-        gatewayRegs.rampUpTimeSec = value;
+        if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_UP) == 0U)
+        {
+            gatewayRegs.rampUpTimeSec = value;
+        }
     }
 
     ok = rfQueryU16("QRD\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
     if (ok == true)
     {
-        gatewayRegs.rampDownTimeSec = value;
+        if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_DOWN) == 0U)
+        {
+            gatewayRegs.rampDownTimeSec = value;
+        }
     }
 
     ok = rfQueryU16("QSET\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
     if (ok == true)
     {
-        gatewayRegs.setpoint = value;
+        if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_SETPOINT) == 0U)
+        {
+            gatewayRegs.setpoint = value;
+        }
     }
 
     ok = rfQueryU16("R\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
     if (ok == true)
     {
-        gatewayRegs.rfOnOff = value;
+        if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RF_ONOFF) == 0U)
+        {
+            gatewayRegs.rfOnOff = value;
+        }
     }
 
     applyPendingWrites(nowTick);
@@ -229,6 +242,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RF_ONOFF, rfOnOff);
+            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -242,6 +256,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_SETPOINT, setpoint);
+            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -255,6 +270,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RAMP_UP, rampUp);
+            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -268,6 +284,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RAMP_DOWN, rampDown);
+            (void)rfDiscardLine(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;

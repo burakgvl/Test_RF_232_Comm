@@ -40,6 +40,18 @@ bool rfSendCmd(const char *cmd);
 bool rfReadLine(char *out, uint16_t outMax, uint32_t timeoutMs);
 
 /**
+ * @brief Clears any currently buffered RF line.
+ */
+void rfClearBufferedLine(void);
+
+/**
+ * @brief Discards one RF response line if it arrives within timeout.
+ * @param timeoutMs Timeout in milliseconds.
+ * @return true if a line was discarded, false if timeout/no line.
+ */
+bool rfDiscardLine(uint32_t timeoutMs);
+
+/**
  * @brief Sends a command and parses first uint16 value from the response.
  * @param cmd Command string including '\r'.
  * @param outVal Parsed value.

@@ -10,6 +10,7 @@
 
 #define RF_LINE_MAX                 (64U)
 #define RF_UART_TX_TIMEOUT_MS       (200U)
+#define RF_DISCARD_TMP_MAX          (8U)
 
 static UART_HandleTypeDef *rfUartHandle = NULL;
 
@@ -66,6 +67,21 @@ void rfOnRxByte(uint8_t rxByte)
             rfLineLen++;
         }
     }
+}
+
+void rfClearBufferedLine(void)
+{
+    __disable_irq();
+    rfLineReady = false;
+    rfLineLen = 0U;
+    __enable_irq();
+}
+
+bool rfDiscardLine(uint32_t timeoutMs)
+{
+    char tmp[RF_DISCARD_TMP_MAX];
+
+    return rfReadLine(tmp, (uint16_t)sizeof(tmp), timeoutMs);
 }
 
 /**
@@ -148,6 +164,8 @@ bool rfQueryU16(const char *cmd, uint16_t *outVal, uint32_t timeoutMs)
     {
         return false;
     }
+
+    rfClearBufferedLine();
 
     ok = rfSendCmd(cmd);
     if (ok == false)
