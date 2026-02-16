@@ -100,7 +100,7 @@ void gatewayTaskProcess(void)
         }
     }
 
-    ok = rfQueryU16("R\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+    ok = rfQueryOnOffStatus(&value, GATEWAY_RF_QUERY_TIMEOUT_MS);
     if (ok == true)
     {
         if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RF_ONOFF) == 0U)

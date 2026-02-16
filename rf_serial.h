@@ -63,4 +63,16 @@ void rfDrainRx(uint32_t timeoutMs);
  */
 bool rfQueryU16(const char *cmd, uint16_t *outVal, uint32_t timeoutMs);
 
+/**
+ * @brief Sends R<cr> and decodes RF ON/OFF from short status mapped string.
+ *
+ * Expected response payload format is a 7-character mapped ASCII string
+ * (example: "2320020"). RF ON/OFF is bit3 of character #4.
+ *
+ * @param outOnOff Output value: 1 = RF ON, 0 = RF OFF.
+ * @param timeoutMs Timeout in milliseconds.
+ * @return true on successful decode, false otherwise.
+ */
+bool rfQueryOnOffStatus(uint16_t *outOnOff, uint32_t timeoutMs);
+
 #endif /* INC_RF_SERIAL_H_ */
