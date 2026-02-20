@@ -12,10 +12,12 @@
 #include <stdio.h>
 
 // Time-sliced scheduler for low-frequency MCUs
-#define GATEWAY_TASK_PERIOD_MS          (20U)
-#define GATEWAY_RF_QUERY_TIMEOUT_MS     (20U)
-#define GATEWAY_RF_WRITE_COOLDOWN_MS    (50U)
-#define GATEWAY_RF_WRITE_DISCARD_MS     (5U)
+#define GATEWAY_TASK_PERIOD_MS              (20U)
+#define GATEWAY_RF_QUERY_TIMEOUT_MS         (20U)
+#define GATEWAY_RF_WRITE_COOLDOWN_MS        (50U)
+#define GATEWAY_RF_WRITE_DISCARD_MS         (5U)
+#define GATEWAY_QUERY_FWD_REFL_PERIOD_MS    (1000U)
+#define GATEWAY_QUERY_SLOW_PERIOD_MS        (3000U)
 
 typedef enum
 {
@@ -34,6 +36,8 @@ static uint8_t getPendingMaskSnapshot(uint16_t *rampUp,
                                       uint16_t *rfOnOff,
                                       uint16_t *setpoint);
 static void clearPendingBitIfMatched(uint8_t bit, uint16_t desiredValue);
+static uint32_t queryPeriodMs(uint8_t queryStep);
+static void executeQueryStep(uint8_t queryStep);
 
 volatile GatewayRegs_t gatewayRegs =
 {
@@ -54,16 +58,20 @@ volatile GatewayRegs_t gatewayRegs =
  * @brief Periodic gateway task.
  *
  * Scheduler runs with 20ms time-slice:
- * - Applies one pending write opportunity
- * - Executes one RF query step (round-robin) to reduce blocking time
+ * - Applies pending writes quickly for responsive Modbus commands
+ * - Executes at most one due RF query based on per-parameter periods
+ *
+ * Query periods:
+ * - FWD/REFL power: every 1000ms
+ * - Other status/config values: every 3000ms
  */
 void gatewayTaskProcess(void)
 {
     static uint32_t lastTaskTick = 0U;
-    static uint8_t queryStep = (uint8_t)GATEWAY_QUERY_FWD_PWR;
+    static uint8_t queryCursor = (uint8_t)GATEWAY_QUERY_FWD_PWR;
+    static uint32_t lastQueryTick[GATEWAY_QUERY_COUNT] = {0U};
     uint32_t nowTick;
-    uint16_t value;
-    bool ok;
+    uint8_t i;
 
     nowTick = HAL_GetTick();
 
@@ -76,6 +84,40 @@ void gatewayTaskProcess(void)
 
     applyPendingWrites(nowTick);
 
+    for (i = 0U; i < (uint8_t)GATEWAY_QUERY_COUNT; i++)
+    {
+        uint8_t step;
+        uint32_t periodMs;
+
+        step = (uint8_t)((queryCursor + i) % (uint8_t)GATEWAY_QUERY_COUNT);
+        periodMs = queryPeriodMs(step);
+
+        if ((nowTick - lastQueryTick[step]) >= periodMs)
+        {
+            executeQueryStep(step);
+            lastQueryTick[step] = nowTick;
+            queryCursor = (uint8_t)((step + 1U) % (uint8_t)GATEWAY_QUERY_COUNT);
+            break;
+        }
+    }
+}
+
+static uint32_t queryPeriodMs(uint8_t queryStep)
+{
+    if ((queryStep == (uint8_t)GATEWAY_QUERY_FWD_PWR) ||
+        (queryStep == (uint8_t)GATEWAY_QUERY_REFL_PWR))
+    {
+        return GATEWAY_QUERY_FWD_REFL_PERIOD_MS;
+    }
+
+    return GATEWAY_QUERY_SLOW_PERIOD_MS;
+}
+
+static void executeQueryStep(uint8_t queryStep)
+{
+    uint16_t value;
+    bool ok;
+
     if (queryStep == (uint8_t)GATEWAY_QUERY_FWD_PWR)
     {
         ok = rfQueryU16("W?\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
@@ -83,64 +125,58 @@ void gatewayTaskProcess(void)
         {
             gatewayRegs.forwardPower = value;
         }
+
+        return;
     }
-    else if (queryStep == (uint8_t)GATEWAY_QUERY_REFL_PWR)
+
+    if (queryStep == (uint8_t)GATEWAY_QUERY_REFL_PWR)
     {
         ok = rfQueryU16("R?\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
         if (ok == true)
         {
             gatewayRegs.reflectedPower = value;
         }
-    }
-    else if (queryStep == (uint8_t)GATEWAY_QUERY_RAMP_UP)
-    {
-        ok = rfQueryU16("QRU\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-        if (ok == true)
-        {
-            if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_UP) == 0U)
-            {
-                gatewayRegs.rampUpTimeSec = value;
-            }
-        }
-    }
-    else if (queryStep == (uint8_t)GATEWAY_QUERY_RAMP_DOWN)
-    {
-        ok = rfQueryU16("QRD\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-        if (ok == true)
-        {
-            if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_DOWN) == 0U)
-            {
-                gatewayRegs.rampDownTimeSec = value;
-            }
-        }
-    }
-    else if (queryStep == (uint8_t)GATEWAY_QUERY_SETPOINT)
-    {
-        ok = rfQueryU16("QSET\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-        if (ok == true)
-        {
-            if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_SETPOINT) == 0U)
-            {
-                gatewayRegs.setpoint = value;
-            }
-        }
-    }
-    else
-    {
-        ok = rfQueryOnOffStatus(&value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-        if (ok == true)
-        {
-            if ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RF_ONOFF) == 0U)
-            {
-                gatewayRegs.rfOnOff = value;
-            }
-        }
+
+        return;
     }
 
-    queryStep++;
-    if (queryStep >= (uint8_t)GATEWAY_QUERY_COUNT)
+    if (queryStep == (uint8_t)GATEWAY_QUERY_RAMP_UP)
     {
-        queryStep = (uint8_t)GATEWAY_QUERY_FWD_PWR;
+        ok = rfQueryU16("QRU\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_UP) == 0U))
+        {
+            gatewayRegs.rampUpTimeSec = value;
+        }
+
+        return;
+    }
+
+    if (queryStep == (uint8_t)GATEWAY_QUERY_RAMP_DOWN)
+    {
+        ok = rfQueryU16("QRD\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_DOWN) == 0U))
+        {
+            gatewayRegs.rampDownTimeSec = value;
+        }
+
+        return;
+    }
+
+    if (queryStep == (uint8_t)GATEWAY_QUERY_SETPOINT)
+    {
+        ok = rfQueryU16("QSET\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_SETPOINT) == 0U))
+        {
+            gatewayRegs.setpoint = value;
+        }
+
+        return;
+    }
+
+    ok = rfQueryOnOffStatus(&value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+    if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RF_ONOFF) == 0U))
+    {
+        gatewayRegs.rfOnOff = value;
     }
 }
 
