@@ -11,9 +11,24 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-#define GATEWAY_TASK_PERIOD_MS          (100U)
-#define GATEWAY_RF_QUERY_TIMEOUT_MS     (100U)
-#define GATEWAY_RF_WRITE_COOLDOWN_MS    (100U)
+// Time-sliced scheduler for low-frequency MCUs
+#define GATEWAY_TASK_PERIOD_MS              (20U)
+#define GATEWAY_RF_QUERY_TIMEOUT_MS         (20U)
+#define GATEWAY_RF_WRITE_COOLDOWN_MS        (50U)
+#define GATEWAY_RF_WRITE_DISCARD_MS         (5U)
+#define GATEWAY_QUERY_FWD_REFL_PERIOD_MS    (1000U)
+#define GATEWAY_QUERY_SLOW_PERIOD_MS        (3000U)
+
+typedef enum
+{
+    GATEWAY_QUERY_FWD_PWR = 0,
+    GATEWAY_QUERY_REFL_PWR,
+    GATEWAY_QUERY_RAMP_UP,
+    GATEWAY_QUERY_RAMP_DOWN,
+    GATEWAY_QUERY_SETPOINT,
+    GATEWAY_QUERY_RF_ONOFF,
+    GATEWAY_QUERY_COUNT
+} GatewayQueryStep_t;
 
 static void applyPendingWrites(uint32_t nowTick);
 static uint8_t getPendingMaskSnapshot(uint16_t *rampUp,
@@ -21,6 +36,8 @@ static uint8_t getPendingMaskSnapshot(uint16_t *rampUp,
                                       uint16_t *rfOnOff,
                                       uint16_t *setpoint);
 static void clearPendingBitIfMatched(uint8_t bit, uint16_t desiredValue);
+static uint32_t queryPeriodMs(uint8_t queryStep);
+static void executeQueryStep(uint8_t queryStep);
 
 volatile GatewayRegs_t gatewayRegs =
 {
@@ -40,16 +57,21 @@ volatile GatewayRegs_t gatewayRegs =
 /**
  * @brief Periodic gateway task.
  *
- * Scheduler runs every 100ms:
- * - Read forward/reflected power and update cache
- * - Apply one pending write to RF (priority based)
+ * Scheduler runs with 20ms time-slice:
+ * - Applies pending writes quickly for responsive Modbus commands
+ * - Executes at most one due RF query based on per-parameter periods
+ *
+ * Query periods:
+ * - FWD/REFL power: every 1000ms
+ * - Other status/config values: every 3000ms
  */
 void gatewayTaskProcess(void)
 {
     static uint32_t lastTaskTick = 0U;
+    static uint8_t queryCursor = (uint8_t)GATEWAY_QUERY_FWD_PWR;
+    static uint32_t lastQueryTick[GATEWAY_QUERY_COUNT] = {0U};
     uint32_t nowTick;
-    uint16_t value;
-    bool ok;
+    uint8_t i;
 
     nowTick = HAL_GetTick();
 
@@ -60,43 +82,102 @@ void gatewayTaskProcess(void)
 
     lastTaskTick = nowTick;
 
-    ok = rfQueryU16("W?\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-    if (ok == true)
+    applyPendingWrites(nowTick);
+
+    for (i = 0U; i < (uint8_t)GATEWAY_QUERY_COUNT; i++)
     {
-        gatewayRegs.forwardPower = value;
+        uint8_t step;
+        uint32_t periodMs;
+
+        step = (uint8_t)((queryCursor + i) % (uint8_t)GATEWAY_QUERY_COUNT);
+        periodMs = queryPeriodMs(step);
+
+        if ((nowTick - lastQueryTick[step]) >= periodMs)
+        {
+            executeQueryStep(step);
+            lastQueryTick[step] = nowTick;
+            queryCursor = (uint8_t)((step + 1U) % (uint8_t)GATEWAY_QUERY_COUNT);
+            break;
+        }
+    }
+}
+
+static uint32_t queryPeriodMs(uint8_t queryStep)
+{
+    if ((queryStep == (uint8_t)GATEWAY_QUERY_FWD_PWR) ||
+        (queryStep == (uint8_t)GATEWAY_QUERY_REFL_PWR))
+    {
+        return GATEWAY_QUERY_FWD_REFL_PERIOD_MS;
     }
 
-    ok = rfQueryU16("R?\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-    if (ok == true)
+    return GATEWAY_QUERY_SLOW_PERIOD_MS;
+}
+
+static void executeQueryStep(uint8_t queryStep)
+{
+    uint16_t value;
+    bool ok;
+
+    if (queryStep == (uint8_t)GATEWAY_QUERY_FWD_PWR)
     {
-        gatewayRegs.reflectedPower = value;
+        ok = rfQueryU16("W?\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if (ok == true)
+        {
+            gatewayRegs.forwardPower = value;
+        }
+
+        return;
     }
 
-    ok = rfQueryU16("QRU\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-    if (ok == true)
+    if (queryStep == (uint8_t)GATEWAY_QUERY_REFL_PWR)
     {
-        gatewayRegs.rampUpTimeSec = value;
+        ok = rfQueryU16("R?\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if (ok == true)
+        {
+            gatewayRegs.reflectedPower = value;
+        }
+
+        return;
     }
 
-    ok = rfQueryU16("QRD\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-    if (ok == true)
+    if (queryStep == (uint8_t)GATEWAY_QUERY_RAMP_UP)
     {
-        gatewayRegs.rampDownTimeSec = value;
+        ok = rfQueryU16("QRU\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_UP) == 0U))
+        {
+            gatewayRegs.rampUpTimeSec = value;
+        }
+
+        return;
     }
 
-    ok = rfQueryU16("QSET\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-    if (ok == true)
+    if (queryStep == (uint8_t)GATEWAY_QUERY_RAMP_DOWN)
     {
-        gatewayRegs.setpoint = value;
+        ok = rfQueryU16("QRD\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RAMP_DOWN) == 0U))
+        {
+            gatewayRegs.rampDownTimeSec = value;
+        }
+
+        return;
     }
 
-    ok = rfQueryU16("R\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
-    if (ok == true)
+    if (queryStep == (uint8_t)GATEWAY_QUERY_SETPOINT)
+    {
+        ok = rfQueryU16("QSET\r", &value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+        if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_SETPOINT) == 0U))
+        {
+            gatewayRegs.setpoint = value;
+        }
+
+        return;
+    }
+
+    ok = rfQueryOnOffStatus(&value, GATEWAY_RF_QUERY_TIMEOUT_MS);
+    if ((ok == true) && ((gatewayRegs.pendingWriteMask & GATEWAY_WRITE_RF_ONOFF) == 0U))
     {
         gatewayRegs.rfOnOff = value;
     }
-
-    applyPendingWrites(nowTick);
 }
 
 /**
@@ -229,6 +310,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RF_ONOFF, rfOnOff);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -242,6 +324,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_SETPOINT, setpoint);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -255,6 +338,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RAMP_UP, rampUp);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
@@ -268,6 +352,7 @@ static void applyPendingWrites(uint32_t nowTick)
         if (ok == true)
         {
             clearPendingBitIfMatched(GATEWAY_WRITE_RAMP_DOWN, rampDown);
+            rfDrainRx(GATEWAY_RF_WRITE_DISCARD_MS);
         }
 
         return;
